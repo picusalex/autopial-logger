@@ -29,6 +29,8 @@ class AutopialSession:
     def __init__(self, origin):
         self.origin = origin
         self.session_uid = hashlib.md5(origin.encode('utf-8')).hexdigest()
+        self._prev_lat = None
+        self._prev_lon = None
         self.create()
 
     def create(self):
@@ -53,28 +55,40 @@ class AutopialSession:
 
 
 class CheckFolder(AutopialWorker):
-    def __init__(self, mqtt_client, time_sleep, folder_path):
+    def __init__(self, mqtt_client, time_sleep, folder_path, min_size=None, max_size=None):
         AutopialWorker.__init__(self, mqtt_client, time_sleep, logger=logger)
         self.folder_path = os.path.realpath(folder_path)
+        self.min_size = min_size
+        self.max_size = max_size
 
     def run(self):
         logger.info("CheckFolder thread starts")
         while self.wait():
             files = glob.glob(os.path.join(self.folder_path, "*.csv"))
             for csv_filepath in files:
+                logger.info("##########################################################################")
+                logger.info("File found: {}".format(csv_filepath))
 
                 filename = os.path.basename(csv_filepath)
                 lock_file = csv_filepath+".lock"
                 done_file = csv_filepath + ".done"
 
-                autopial_session = AutopialSession(filename)
-
-                if os.path.exists(done_file):
-                    logger.info("Ignoring file '{}' because already imported ('{}' exists)".format(csv_filepath, done_file))
+                filesize = os.path.getsize(csv_filepath)
+                if self.min_size is not None and filesize < self.min_size:
+                    logger.warning(" - Ignore small file: {} (filesize < {})".format(filename, self.min_size))
                     continue
 
+                if self.max_size is not None and filesize > self.max_size:
+                    logger.warning(" - Ignore big file: {} (filesize > {})".format(filename, self.max_size))
+                    continue
+
+                if os.path.exists(done_file):
+                    logger.info(" - file '{}' already imported ('{}' exists)".format(filename, done_file))
+                    continue
+
+                autopial_session = AutopialSession(filename)
                 if os.path.exists(lock_file):
-                    logger.warning("Cannot lock file '{}' because it already exists".format(lock_file))
+                    logger.warning(" ! Cannot lock file '{}' because it already exists".format(lock_file))
                     autopial_session.recreate()
                     os.remove(lock_file)
 
@@ -123,6 +137,17 @@ if __name__ == '__main__':
         database_path = cfg.get("database", "path")
         torque_path = cfg.get("torque_log", "path")
         check_every = cfg.get("torque_log", "check_every")
+        min_size = cfg.get("torque_log", "min_size")
+        if min_size.endswith("k"):
+            min_size = float(min_size.strip("k"))*1024
+        elif min_size.endswith("M"):
+            min_size = float(min_size.strip("M"))*1024*1024
+
+        max_size = cfg.get("torque_log", "max_size")
+        if max_size.endswith("k"):
+            max_size = float(max_size.strip("k"))*1024
+        elif max_size.endswith("M"):
+            max_size = float(max_size.strip("M"))*1024*1024
     except BaseException as e:
         logger.error("Invalid config file: {}".format(e))
         sys.exit(1)
@@ -137,7 +162,7 @@ if __name__ == '__main__':
     mqtt_client.loop_start()
     mqtt_client.subscribe("autopial/#", qos=0)
 
-    folder_checker = CheckFolder("TorqueFolder", time_sleep=check_every, folder_path=torque_path)
+    folder_checker = CheckFolder("TorqueFolder", time_sleep=check_every, folder_path=torque_path, min_size=min_size, max_size=max_size)
     folder_checker.start()
 
     try:
