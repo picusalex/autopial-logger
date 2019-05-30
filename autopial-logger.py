@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import copy
 import datetime
 import hashlib
 import json
@@ -11,8 +12,11 @@ import logging
 import paho.mqtt.client as mqtt #import the client1
 import glob
 
+from haversine import haversine
+
 from autopial_lib.config_driver import ConfigFile
-from autopial_lib.database_driver import DatabaseDriver
+from autopial_lib.Controller.CarSession import CarSession
+from autopial_lib.SQLDatabaseDriver.sql_driver import DatabaseDriver
 from autopial_lib.thread_worker import AutopialWorker
 from autopial_lib.TorqueDriver import TorqueFileReader
 
@@ -23,36 +27,7 @@ stream_formatter = logging.Formatter('%(asctime)s|%(levelname)08s | %(message)s'
 steam_handler.setFormatter(stream_formatter)
 logger.addHandler(steam_handler)
 
-db = None
-
-class AutopialSession:
-    def __init__(self, origin):
-        self.origin = origin
-        self.session_uid = hashlib.md5(origin.encode('utf-8')).hexdigest()
-        self._prev_lat = None
-        self._prev_lon = None
-        self.create()
-
-    def create(self):
-        logger.info("Creating session {} from {}".format(self.session_uid, self.origin))
-        db.create_session(self.session_uid, self.origin)
-
-    def start(self, start_date=datetime.datetime.now()):
-        db.update_session(self.session_uid, start_date=start_date, status="ONGOING")
-
-    def stop(self):
-        db.update_session_metadata(self.session_uid)
-        db.update_session(self.session_uid, status="TERMINATED")
-        db.print_session(self.session_uid)
-
-    def add_gps_location(self, fix, longitude, latitude, altitude, timestamp):
-        db.add_gps_location(self.session_uid, fix, longitude, latitude, altitude, timestamp)
-
-    def recreate(self):
-        db.delete_session(self.session_uid)
-        self.create()
-
-
+db_driver = None
 
 class CheckFolder(AutopialWorker):
     def __init__(self, mqtt_client, time_sleep, folder_path, min_size=None, max_size=None):
@@ -73,6 +48,10 @@ class CheckFolder(AutopialWorker):
                 lock_file = csv_filepath+".lock"
                 done_file = csv_filepath + ".done"
 
+                if os.path.exists(done_file):
+                    logger.info(" - file '{}' already imported ('{}' exists)".format(filename, done_file))
+                    continue
+
                 filesize = os.path.getsize(csv_filepath)
                 if self.min_size is not None and filesize < self.min_size:
                     logger.warning(" - Ignore small file: {} (filesize < {})".format(filename, self.min_size))
@@ -82,37 +61,30 @@ class CheckFolder(AutopialWorker):
                     logger.warning(" - Ignore big file: {} (filesize > {})".format(filename, self.max_size))
                     continue
 
-                if os.path.exists(done_file):
-                    logger.info(" - file '{}' already imported ('{}' exists)".format(filename, done_file))
+                torque_csv = TorqueFileReader(csv_filepath)
+                if not torque_csv.isReady:
+                    logger.error(" - error while opening CSV file '{}'".format(filename))
                     continue
 
-                autopial_session = AutopialSession(filename)
+                autopial_session = CarSession(origin=filename,
+                                              db_driver=db_driver,
+                                              logger=logger)
+
                 if os.path.exists(lock_file):
                     logger.warning(" ! Cannot lock file '{}' because it already exists".format(lock_file))
                     autopial_session.recreate()
                     os.remove(lock_file)
 
-                torque_csv = TorqueFileReader(csv_filepath)
                 os.mknod(lock_file)
 
                 last_ts = 0
                 autopial_session.start(start_date=torque_csv.start_date)
                 for line in torque_csv.readline():
-                    if (line["timestamp"] - last_ts) > 5:
-                        gps_location = autopial_session.add_gps_location(latitude=line["latitude"],
-                                                           longitude=line["longitude"],
-                                                           altitude=line["altitude"],
-                                                           fix=line["fix"],
-                                                           timestamp=line["timestamp"])
+                    if (line["timestamp"] - last_ts) > 1:
+                        autopial_session.new_car_data(**line)
                         last_ts = line["timestamp"]
 
-                gps_location = autopial_session.add_gps_location(latitude=line["latitude"],
-                                                   longitude=line["longitude"],
-                                                   altitude=line["altitude"],
-                                                   fix=line["fix"],
-                                                   timestamp=line["timestamp"])
-
-
+                autopial_session.new_car_data(**line)
                 autopial_session.stop()
 
                 os.remove(lock_file)
@@ -153,7 +125,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     logger.info("Connecting to database: {}".format(database_path))
-    db = DatabaseDriver(database=database_path, logger=logger)
+    db_driver = DatabaseDriver(database=database_path, logger=logger)
 
     broker_address = "localhost"
     mqtt_client = mqtt.Client("sibus-logger")
