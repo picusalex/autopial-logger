@@ -30,16 +30,35 @@ logger.addHandler(steam_handler)
 db_driver = None
 
 class CheckFolder(AutopialWorker):
-    def __init__(self, mqtt_client, time_sleep, folder_path, min_size=None, max_size=None):
+    def __init__(self, mqtt_client,
+                 time_sleep,
+                 folder_path,
+                 file_pattern,
+                 min_size=None,
+                 max_size=None):
         AutopialWorker.__init__(self, mqtt_client, time_sleep, logger=logger)
         self.folder_path = os.path.realpath(folder_path)
+        self.file_pattern = file_pattern
         self.min_size = min_size
         self.max_size = max_size
+
+    def find_files(self, path=None):
+        if path is None: path = self.folder_path
+        files = []
+
+        for i in os.listdir(path):
+            full_i = os.path.join(path, i)
+            if os.path.isdir(full_i):
+                files.extend(self.find_files(full_i))
+        files.extend(glob.glob(os.path.join(path, self.file_pattern)))
+        return files
 
     def run(self):
         logger.info("CheckFolder thread starts")
         while self.wait():
-            files = glob.glob(os.path.join(self.folder_path, "*.csv"))
+            #files = glob.glob(os.path.join(self.folder_path, "*.csv"))
+            files = self.find_files()
+
             for csv_filepath in files:
                 logger.info("##########################################################################")
                 logger.info("File found: {}".format(csv_filepath))
@@ -108,6 +127,7 @@ if __name__ == '__main__':
     try:
         database_path = cfg.get("database", "path")
         torque_path = cfg.get("torque_log", "path")
+        torque_pattern = cfg.get("torque_log", "pattern")
         check_every = cfg.get("torque_log", "check_every")
         min_size = cfg.get("torque_log", "min_size")
         if min_size.endswith("k"):
@@ -125,7 +145,8 @@ if __name__ == '__main__':
         sys.exit(1)
 
     logger.info("Connecting to database: {}".format(database_path))
-    db_driver = DatabaseDriver(database=database_path, logger=logger)
+    db_driver = DatabaseDriver(database=database_path,
+                               logger=logger)
 
     broker_address = "localhost"
     mqtt_client = mqtt.Client("sibus-logger")
@@ -134,7 +155,12 @@ if __name__ == '__main__':
     mqtt_client.loop_start()
     mqtt_client.subscribe("autopial/#", qos=0)
 
-    folder_checker = CheckFolder("TorqueFolder", time_sleep=check_every, folder_path=torque_path, min_size=min_size, max_size=max_size)
+    folder_checker = CheckFolder("TorqueFolder",
+                                 time_sleep=check_every,
+                                 folder_path=torque_path,
+                                 file_pattern=torque_pattern,
+                                 min_size=min_size,
+                                 max_size=max_size)
     folder_checker.start()
 
     try:
