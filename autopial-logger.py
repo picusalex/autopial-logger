@@ -1,23 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import copy
-import datetime
-import hashlib
+
 import json
 import sys
-import uuid
 import time
 import os
 import logging
-import paho.mqtt.client as mqtt #import the client1
+import paho.mqtt.client as mqtt
 import glob
 
-from haversine import haversine
-
-from autopial_lib.config_driver import ConfigFile
-from autopial_lib.Controller.CarSession import CarSession
-from autopial_lib.SQLDatabaseDriver.sql_driver import DatabaseDriver
 from autopial_lib.thread_worker import AutopialWorker
+from autopial_lib.config_driver import ConfigFile
+
+from autopial_lib.Controller.CarController import CarController
+from autopial_lib.MongoDatabaseDriver.CarDriver import CarDriver
 from autopial_lib.TorqueDriver import TorqueFileReader
 
 logger = logging.getLogger(__name__)
@@ -42,6 +38,8 @@ class CheckFolder(AutopialWorker):
         self.min_size = min_size
         self.max_size = max_size
 
+        self.controller = CarController(db_driver=db_driver, logger=logger)
+
     def find_files(self, path=None):
         if path is None: path = self.folder_path
         files = []
@@ -60,7 +58,8 @@ class CheckFolder(AutopialWorker):
             files = self.find_files()
 
             for csv_filepath in files:
-                logger.info("##########################################################################")
+                logger.info("****************************************************************")
+                logger.info("****************************************************************")
                 logger.info("File found: {}".format(csv_filepath))
 
                 filename = os.path.basename(csv_filepath)
@@ -85,13 +84,11 @@ class CheckFolder(AutopialWorker):
                     logger.error(" - error while opening CSV file '{}'".format(filename))
                     continue
 
-                autopial_session = CarSession(origin=filename,
-                                              db_driver=db_driver,
-                                              logger=logger)
+                autopial_session = self.controller.create(origin=filename)
 
                 if os.path.exists(lock_file):
                     logger.warning(" ! Cannot lock file '{}' because it already exists".format(lock_file))
-                    autopial_session.recreate()
+                    self.controller.recreate(origin=filename)
                     os.remove(lock_file)
 
                 os.mknod(lock_file)
@@ -103,11 +100,14 @@ class CheckFolder(AutopialWorker):
                         autopial_session.new_car_data(**line)
                         last_ts = line["timestamp"]
 
-                autopial_session.new_car_data(**line)
+                #autopial_session.new_car_data(**line)
                 autopial_session.stop()
 
                 os.remove(lock_file)
                 os.mknod(done_file)
+
+                logger.info("File treated: {}".format(csv_filepath))
+                logger.info("****************************************************************")
 
         logger.info("CheckFolder thread ends")
 
@@ -145,8 +145,12 @@ if __name__ == '__main__':
         sys.exit(1)
 
     logger.info("Connecting to database: {}".format(database_path))
-    db_driver = DatabaseDriver(database=database_path,
-                               logger=logger)
+    try:
+        db_driver = CarDriver(db_path=database_path,
+                          logger=logger)
+    except Exception as e:
+        logger.error("Unable to connect to mongodb on '{}' ({})".format(database_path, e))
+        sys.exit(1)
 
     broker_address = "localhost"
     mqtt_client = mqtt.Client("sibus-logger")
